@@ -120,6 +120,78 @@ app.post("/verify-delta-auth", async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════
+// Vérification publique de certificat — accessible sans connexion,
+// utile par exemple pour qu'un employeur vérifie un certificat.
+// ══════════════════════════════════════════════════════════
+const SUPABASE_URL = "https://qwsqxusmjxcmufllcvww.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_ygofuXiyqVT-bT9he8Nhzg_2xRKrc6b";
+
+app.get("/verify-certificate", async (req, res) => {
+  const certId = req.query.id;
+  if (!certId) {
+    return res.status(400).send(renderCertPage(false, null, null));
+  }
+  try {
+    const enrRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/enrollments?certificate_id=eq.${encodeURIComponent(certId)}&status=eq.completed&select=*`,
+      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY } }
+    );
+    const enrData = await enrRes.json();
+    if (!Array.isArray(enrData) || !enrData.length) {
+      return res.status(404).send(renderCertPage(false, null, null));
+    }
+    const enr = enrData[0];
+
+    const courseRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/courses?id=eq.${encodeURIComponent(enr.course_id)}&select=title,instructor_nickname`,
+      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY } }
+    );
+    const courseData = await courseRes.json();
+    const course = Array.isArray(courseData) && courseData[0] ? courseData[0] : null;
+
+    const userRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/users?did=eq.${encodeURIComponent(enr.student_did)}&select=nickname`,
+      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY } }
+    );
+    const userData = await userRes.json();
+    const student = Array.isArray(userData) && userData[0] ? userData[0] : null;
+
+    res.send(renderCertPage(true, enr, { course, student }));
+  } catch (e) {
+    console.error("[verify-certificate] Erreur:", e.message || String(e));
+    res.status(500).send(renderCertPage(false, null, null));
+  }
+});
+
+function renderCertPage(valid, enr, extra) {
+  const style = `body{font-family:sans-serif;background:#0A0118;color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px}
+    .card{background:#1a0a2e;border:1px solid rgba(255,184,0,.3);border-radius:16px;padding:32px;max-width:480px;text-align:center}
+    h1{color:#FFB800;font-size:22px}
+    .row{margin:12px 0;font-size:14px;color:#ddd}
+    .label{color:#9B4FDE;font-weight:bold;display:block;font-size:11px;text-transform:uppercase}
+    .badge{font-size:40px;margin-bottom:12px}`;
+  if (!valid) {
+    return `<html><head><style>${style}</style></head><body>
+      <div class="card"><div class="badge">❌</div><h1>Certificat introuvable</h1>
+      <p class="row">Aucun certificat valide ne correspond à cet identifiant.</p></div>
+      </body></html>`;
+  }
+  const course = extra && extra.course;
+  const student = extra && extra.student;
+  return `<html><head><style>${style}</style></head><body>
+    <div class="card">
+      <div class="badge">✅</div>
+      <h1>Certificat authentique</h1>
+      <div class="row"><span class="label">Étudiant</span>${(student && student.nickname) || "—"}</div>
+      <div class="row"><span class="label">Cours</span>${(course && course.title) || "—"}</div>
+      <div class="row"><span class="label">Formateur</span>${(course && course.instructor_nickname) || "—"}</div>
+      <div class="row"><span class="label">Terminé le</span>${new Date(enr.updated_at || enr.enrolled_at).toLocaleDateString()}</div>
+      <div class="row" style="margin-top:20px;font-size:11px;color:#888">Vérifié via Lumino — écosystème Delta</div>
+    </div>
+    </body></html>`;
+}
+
 app.get("/", (req, res) => {
   res.send("Lumino auth verification service — OK");
 });
