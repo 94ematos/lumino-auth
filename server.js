@@ -27,6 +27,43 @@ app.use((req, res, next) => {
 const APP_ID = 40; // App ID Lumino sur DApp Square
 const ICP_HOST = "https://icp-api.io";
 
+// ══════════════════════════════════════════════════════════
+// SECRET JWT PAR APP
+// ──────────────────────────────────────────────────────────
+// Chaque projet Supabase a son PROPRE secret JWT legacy (Settings →
+// API → JWT Settings). Un JWT signé avec le mauvais secret est
+// censé être rejeté par ce projet-là (auth.jwt() renvoie vide côté
+// RLS, ou 401 selon la configuration). Ce service étant partagé par
+// plusieurs apps, il doit signer chaque JWT avec le secret DU BON
+// projet — jamais un seul secret pour tous.
+//
+// Chaque app doit envoyer un champ "app" dans le corps de sa requête
+// POST /verify-delta-auth (ex: {accCanisterId, dAppIdentToken, app:"wagnina"}).
+// Ajoute une variable d'environnement JWT_SECRET_<NOM> sur Render pour
+// chaque app, avec le secret JWT legacy exact de SON projet Supabase.
+// ══════════════════════════════════════════════════════════
+const APP_JWT_SECRETS = {
+  lumino:      process.env.JWT_SECRET_LUMINO,
+  wagnina:     process.env.JWT_SECRET_WAGNINA,
+  deltarent:   process.env.JWT_SECRET_DELTARENT,
+  deltawork:   process.env.JWT_SECRET_DELTAWORK,
+  palacemarket:process.env.JWT_SECRET_PALACEMARKET,
+};
+
+function resolveJwtSecret(appName) {
+  const key = (appName || "").toLowerCase().trim();
+  const perAppSecret = APP_JWT_SECRETS[key];
+  if (perAppSecret) return { secret: perAppSecret, source: `JWT_SECRET_${key.toUpperCase()}` };
+  // Repli : ancien secret unique (JWT_SIGNING_SECRET), pour compatibilité
+  // avec les apps qui n'envoient pas encore le champ "app". À corriger
+  // app par app dès que possible — ce repli ne garantit PAS que le
+  // secret corresponde au bon projet Supabase.
+  if (process.env.JWT_SIGNING_SECRET) {
+    return { secret: process.env.JWT_SIGNING_SECRET, source: "JWT_SIGNING_SECRET (repli générique — à corriger)" };
+  }
+  return { secret: null, source: null };
+}
+
 // Candid IDL minimal — uniquement getDAppAcctInfo
 const idlFactory = ({ IDL }) => {
   const IdentityToken = IDL.Record({ did: IDL.Text, token: IDL.Text });
@@ -80,20 +117,24 @@ function signJwtHS256(payload, secret) {
 
 app.post("/verify-delta-auth", async (req, res) => {
   try {
-    const { accCanisterId, dAppIdentToken } = req.body;
+    const { accCanisterId, dAppIdentToken, app: appName } = req.body;
     if (!accCanisterId || !dAppIdentToken?.did || !dAppIdentToken?.token) {
       return res.status(400).json({ error: "Requête invalide" });
     }
+    if (!appName) {
+      console.warn("[verify-delta-auth] ⚠️ Champ 'app' absent de la requête — le client doit être mis à jour pour l'envoyer.");
+    }
 
-    console.log("[verify-delta-auth] Requête reçue — accCanisterId:", accCanisterId, "did:", dAppIdentToken.did);
+    console.log("[verify-delta-auth] Requête reçue — app:", appName || "(non fourni)", "accCanisterId:", accCanisterId, "did:", dAppIdentToken.did);
 
     const acctInfo = await verifyDeltaToken(accCanisterId, dAppIdentToken);
     console.log("[verify-delta-auth] Vérification canister réussie ✓", acctInfo);
 
-    const jwtSecret = process.env.JWT_SIGNING_SECRET;
+    const { secret: jwtSecret, source: secretSource } = resolveJwtSecret(appName);
     if (!jwtSecret) {
-      return res.status(500).json({ error: "JWT_SIGNING_SECRET non configuré" });
+      return res.status(500).json({ error: `Aucun secret JWT configuré pour l'app "${appName || '(non fourni)'}"` });
     }
+    console.log("[verify-delta-auth] Secret JWT utilisé:", secretSource);
 
     const now = Math.floor(Date.now() / 1000);
     const jwt = signJwtHS256(
@@ -120,81 +161,15 @@ app.post("/verify-delta-auth", async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════════════════
-// Vérification publique de certificat — accessible sans connexion,
-// utile par exemple pour qu'un employeur vérifie un certificat.
-// ══════════════════════════════════════════════════════════
-const SUPABASE_URL = "https://qwsqxusmjxcmufllcvww.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_ygofuXiyqVT-bT9he8Nhzg_2xRKrc6b";
-
-app.get("/verify-certificate", async (req, res) => {
-  const certId = req.query.id;
-  if (!certId) {
-    return res.status(400).send(renderCertPage(false, null, null));
-  }
-  try {
-    const enrRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/enrollments?certificate_id=eq.${encodeURIComponent(certId)}&status=eq.completed&select=*`,
-      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY } }
-    );
-    const enrData = await enrRes.json();
-    if (!Array.isArray(enrData) || !enrData.length) {
-      return res.status(404).send(renderCertPage(false, null, null));
-    }
-    const enr = enrData[0];
-
-    const courseRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/courses?id=eq.${encodeURIComponent(enr.course_id)}&select=title,instructor_nickname`,
-      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY } }
-    );
-    const courseData = await courseRes.json();
-    const course = Array.isArray(courseData) && courseData[0] ? courseData[0] : null;
-
-    const userRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/users?did=eq.${encodeURIComponent(enr.student_did)}&select=nickname`,
-      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY } }
-    );
-    const userData = await userRes.json();
-    const student = Array.isArray(userData) && userData[0] ? userData[0] : null;
-
-    res.send(renderCertPage(true, enr, { course, student }));
-  } catch (e) {
-    console.error("[verify-certificate] Erreur:", e.message || String(e));
-    res.status(500).send(renderCertPage(false, null, null));
-  }
-});
-
-function renderCertPage(valid, enr, extra) {
-  const style = `body{font-family:sans-serif;background:#0A0118;color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px}
-    .card{background:#1a0a2e;border:1px solid rgba(255,184,0,.3);border-radius:16px;padding:32px;max-width:480px;text-align:center}
-    h1{color:#FFB800;font-size:22px}
-    .row{margin:12px 0;font-size:14px;color:#ddd}
-    .label{color:#9B4FDE;font-weight:bold;display:block;font-size:11px;text-transform:uppercase}
-    .badge{font-size:40px;margin-bottom:12px}`;
-  if (!valid) {
-    return `<html><head><style>${style}</style></head><body>
-      <div class="card"><div class="badge">❌</div><h1>Certificat introuvable</h1>
-      <p class="row">Aucun certificat valide ne correspond à cet identifiant.</p></div>
-      </body></html>`;
-  }
-  const course = extra && extra.course;
-  const student = extra && extra.student;
-  return `<html><head><style>${style}</style></head><body>
-    <div class="card">
-      <div class="badge">✅</div>
-      <h1>Certificat authentique</h1>
-      <div class="row"><span class="label">Étudiant</span>${(student && student.nickname) || "—"}</div>
-      <div class="row"><span class="label">Cours</span>${(course && course.title) || "—"}</div>
-      <div class="row"><span class="label">Formateur</span>${(course && course.instructor_nickname) || "—"}</div>
-      <div class="row"><span class="label">Terminé le</span>${new Date(enr.updated_at || enr.enrolled_at).toLocaleDateString()}</div>
-      <div class="row" style="margin-top:20px;font-size:11px;color:#888">Vérifié via Lumino — écosystème Delta</div>
-    </div>
-    </body></html>`;
-}
-
 app.get("/", (req, res) => {
-  res.send("Lumino auth verification service — OK");
+  const configured = Object.keys(APP_JWT_SECRETS).filter(k => !!APP_JWT_SECRETS[k]);
+  res.send(
+    "Lumino auth verification service — OK\n" +
+    "Secrets JWT par app configurés: " + (configured.length ? configured.join(", ") : "(aucun)") + "\n" +
+    "Repli générique JWT_SIGNING_SECRET: " + (process.env.JWT_SIGNING_SECRET ? "configuré" : "absent")
+  );
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Serveur démarré sur le port " + PORT));
+                               
