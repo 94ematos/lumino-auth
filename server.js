@@ -24,7 +24,28 @@ app.use((req, res, next) => {
   next();
 });
 
-const APP_ID = 40; // App ID Lumino sur DApp Square
+// ══════════════════════════════════════════════════════════
+// APP ID PAR APP
+// ──────────────────────────────────────────────────────────
+// Même bug que pour le secret JWT : APP_ID était codé en dur sur 40
+// (Lumino), donc le canister rejetait la vérification pour toute
+// autre app avec "theAppHasNotBeenAuthorizedByOwner" /
+// "authenticationTokenIsInvalid" — le token est scellé pour un App
+// ID précis côté Delta, ce n'est pas interchangeable.
+// ══════════════════════════════════════════════════════════
+const APP_IDS = {
+  lumino: 40,
+  wagnina: 42,
+  deltarent: 41,
+  deltawork: 32,
+  palacemarket: 29,
+};
+
+function resolveAppId(appName) {
+  const key = (appName || "").toLowerCase().trim();
+  return APP_IDS[key] || 40; // repli Lumino par défaut si "app" absent (à corriger app par app)
+}
+
 const ICP_HOST = "https://icp-api.io";
 
 // ══════════════════════════════════════════════════════════
@@ -92,10 +113,10 @@ function unwrapOpt(v) {
   return Array.isArray(v) && v.length ? v[0] : null;
 }
 
-async function verifyDeltaToken(accCanisterId, dAppIdentToken) {
+async function verifyDeltaToken(accCanisterId, dAppIdentToken, appName) {
   const agent = new HttpAgent({ host: ICP_HOST });
   const actor = Actor.createActor(idlFactory, { agent, canisterId: accCanisterId });
-  return await actor.getDAppAcctInfo(dAppIdentToken, APP_ID);
+  return await actor.getDAppAcctInfo(dAppIdentToken, resolveAppId(appName));
 }
 
 function base64url(input) {
@@ -125,9 +146,9 @@ app.post("/verify-delta-auth", async (req, res) => {
       console.warn("[verify-delta-auth] ⚠️ Champ 'app' absent de la requête — le client doit être mis à jour pour l'envoyer.");
     }
 
-    console.log("[verify-delta-auth] Requête reçue — app:", appName || "(non fourni)", "accCanisterId:", accCanisterId, "did:", dAppIdentToken.did);
+    console.log("[verify-delta-auth] Requête reçue — app:", appName || "(non fourni)", "App ID résolu:", resolveAppId(appName), "accCanisterId:", accCanisterId, "did:", dAppIdentToken.did);
 
-    const acctInfo = await verifyDeltaToken(accCanisterId, dAppIdentToken);
+    const acctInfo = await verifyDeltaToken(accCanisterId, dAppIdentToken, appName);
     console.log("[verify-delta-auth] Vérification canister réussie ✓", acctInfo);
 
     const { secret: jwtSecret, source: secretSource } = resolveJwtSecret(appName);
@@ -166,10 +187,10 @@ app.get("/", (req, res) => {
   res.send(
     "Lumino auth verification service — OK\n" +
     "Secrets JWT par app configurés: " + (configured.length ? configured.join(", ") : "(aucun)") + "\n" +
-    "Repli générique JWT_SIGNING_SECRET: " + (process.env.JWT_SIGNING_SECRET ? "configuré" : "absent")
+    "Repli générique JWT_SIGNING_SECRET: " + (process.env.JWT_SIGNING_SECRET ? "configuré" : "absent") + "\n" +
+    "App IDs par app: " + Object.entries(APP_IDS).map(([k, v]) => k + "=" + v).join(", ")
   );
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Serveur démarré sur le port " + PORT));
-                               
